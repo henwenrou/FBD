@@ -2,6 +2,14 @@ import argparse, os, sys, datetime, importlib
 os.environ['KMP_DUPLICATE_LIB_OK']='true'
 import torch.optim
 from omegaconf import OmegaConf
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'true'
+os.environ.setdefault("OMP_NUM_THREADS", "1")  # Limit OpenMP threads
+os.environ.setdefault("MKL_NUM_THREADS", "1")  # Limit Intel MKL threads
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")  # Limit OpenBLAS threads
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")  # Limit NumExpr threads
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+os.environ.setdefault("PYTHONHASHSEED", "23")
 from torch.utils.data import DataLoader
 from engine import train_warm_up,evaluate,train_one_epoch_SBF,train_one_epoch,prediction_wrapper
 from losses import SetCriterion
