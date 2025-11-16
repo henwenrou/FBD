@@ -9,10 +9,10 @@ import platform
 import torch.utils.data as torch_data
 import math
 import itertools
-from .location_scale_augmentation import LocationScaleAugmentation
+from SLAug.dataloaders.location_scale_augmentation import LocationScaleAugmentation
 hostname = platform.node()
 # folder for datasets
-BASEDIR = './data/abdominal/'
+BASEDIR = './FBD/data/abdominal/'
 print(f'Running on machine {hostname}, using dataset from {BASEDIR}')
 LABEL_NAME = ["bg", "liver", "rk", "lk", "spleen"]
 
