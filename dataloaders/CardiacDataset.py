@@ -8,10 +8,10 @@ import os
 import platform
 import torch.utils.data as torch_data
 from functools import partial
-from SLAug.dataloaders.location_scale_augmentation import LocationScaleAugmentation
+from dataloaders.location_scale_augmentation import LocationScaleAugmentation
 hostname = platform.node()
 # folder for datasets
-BASEDIR = './FBD/data/cardiac/processed'
+BASEDIR = './data/cardiac/processed'
 print(f'Running on machine {hostname}, using dataset from {BASEDIR}')
 LABEL_NAME = ["bg", "Myocardium",  "Lventricle","Rventricle"]
 from dataloaders.niftiio import read_nii_bysitk
