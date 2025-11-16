@@ -127,8 +127,10 @@ class UNetWithFDM(nn.Module):
                 features[stage] = modulated_features[i]
             features = tuple(features)
 
-        # Decode
-        decoder_output = self.unet.decoder(*features)
+        # Decode (SMP decoder expects a list of features)
+        if isinstance(features, tuple):
+            features = list(features)
+        decoder_output = self.unet.decoder(features)
 
         # Segmentation head
         masks = self.unet.segmentation_head(decoder_output)
