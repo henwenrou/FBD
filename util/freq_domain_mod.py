@@ -254,7 +254,8 @@ class FreqDomainModLayer(nn.Module):
         # Inverse FFT shift and transform back to spatial domain
         X_mod = torch.fft.ifftshift(X_mod, dim=(-2, -1))
         x_mod = torch.fft.ifft2(X_mod, dim=(-2, -1))
-        x_mod = x_mod.real
+        # Use torch.real() to avoid warning, input is real so output should be real
+        x_mod = torch.real(x_mod)
 
         return x_mod
 
