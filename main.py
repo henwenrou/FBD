@@ -18,6 +18,14 @@ import random
 from torch.optim import lr_scheduler
 
 def worker_init_fn(worker_id):
+    # Fix: restore reasonable thread count in worker processes
+    # Main process keeps OMP_NUM_THREADS=1 to avoid contention
+    # But workers need more threads for efficient data preprocessing
+    import os
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 def seed_everything(seed=None):
@@ -216,8 +224,13 @@ if __name__ == "__main__":
     data.prepare_data()
     data.setup()
     print(len(data.datasets["train"]))
+    # Fix threading conflict: worker_init_fn restores thread count in workers
+    # while main process keeps OMP_NUM_THREADS=1
+    use_persistent = data.num_workers > 0
     train_loader=DataLoader(data.datasets["train"], batch_size=data.batch_size,
-                          num_workers=data.num_workers, shuffle=True, persistent_workers=True, drop_last=True, pin_memory = True)
+                          num_workers=data.num_workers, shuffle=True,
+                          persistent_workers=use_persistent, drop_last=True, pin_memory=True,
+                          worker_init_fn=worker_init_fn)
 
     val_loader=DataLoader(data.datasets["validation"], batch_size=data.batch_size,  num_workers=1)
 
