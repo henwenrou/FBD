@@ -219,8 +219,11 @@ if __name__ == "__main__":
     data.prepare_data()
     data.setup()
     print(len(data.datasets["train"]))
+    # persistent_workers requires num_workers > 0
+    use_persistent = data.num_workers > 0
     train_loader=DataLoader(data.datasets["train"], batch_size=data.batch_size,
-                          num_workers=data.num_workers, shuffle=True, persistent_workers=True, drop_last=True, pin_memory = True)
+                          num_workers=data.num_workers, shuffle=True,
+                          persistent_workers=use_persistent, drop_last=True, pin_memory=True)
 
     val_loader=DataLoader(data.datasets["validation"], batch_size=data.batch_size,  num_workers=1)
 
