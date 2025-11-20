@@ -18,6 +18,9 @@ import random
 from torch.optim import lr_scheduler
 
 def worker_init_fn(worker_id):
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 def seed_everything(seed=None):
