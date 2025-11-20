@@ -99,6 +99,17 @@ class UNetWithFDM(nn.Module):
         else:
             self.fdm = None
 
+        # Detect SMP decoder API version (do this once in __init__)
+        import inspect
+        decoder_sig = inspect.signature(self.unet.decoder.forward)
+        # New API (0.3+): forward(self, features: List) - normal parameter
+        # Old API (0.2.x): forward(self, *features) - VAR_POSITIONAL parameter
+        has_varargs = any(
+            p.kind == inspect.Parameter.VAR_POSITIONAL
+            for p in decoder_sig.parameters.values()
+        )
+        self._use_new_decoder_api = not has_varargs
+
     def forward(self, x):
         """
         Forward pass with optional FDM applied to encoder features.
@@ -127,17 +138,15 @@ class UNetWithFDM(nn.Module):
                 features[stage] = modulated_features[i]
 
         # Decode - handle different SMP versions
-        # SMP 0.2.x: decoder takes *features (unpacked)
-        # SMP 0.3+: decoder takes list or tuple
-        try:
-            # Try newer API first (list/tuple)
+        # SMP 0.2.x: decoder.forward(*features) - takes unpacked args
+        # SMP 0.3+: decoder.forward(features) - takes list
+        if self._use_new_decoder_api:
+            # New API: pass list
             if isinstance(features, tuple):
                 features = list(features)
             decoder_output = self.unet.decoder(features)
-        except TypeError:
-            # Fall back to older API (unpacked arguments)
-            if isinstance(features, list):
-                features = tuple(features)
+        else:
+            # Old API: unpack arguments
             decoder_output = self.unet.decoder(*features)
 
         # Segmentation head
