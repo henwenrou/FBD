@@ -125,12 +125,20 @@ class UNetWithFDM(nn.Module):
             features = list(features)  # Convert to mutable list
             for i, stage in enumerate(self.fdm_stages):
                 features[stage] = modulated_features[i]
-            features = tuple(features)
 
-        # Decode (SMP decoder expects a list of features)
-        if isinstance(features, tuple):
-            features = list(features)
-        decoder_output = self.unet.decoder(features)
+        # Decode - handle different SMP versions
+        # SMP 0.2.x: decoder takes *features (unpacked)
+        # SMP 0.3+: decoder takes list or tuple
+        try:
+            # Try newer API first (list/tuple)
+            if isinstance(features, tuple):
+                features = list(features)
+            decoder_output = self.unet.decoder(features)
+        except TypeError:
+            # Fall back to older API (unpacked arguments)
+            if isinstance(features, list):
+                features = tuple(features)
+            decoder_output = self.unet.decoder(*features)
 
         # Segmentation head
         masks = self.unet.segmentation_head(decoder_output)
