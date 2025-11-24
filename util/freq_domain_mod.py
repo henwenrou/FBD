@@ -222,6 +222,17 @@ class FreqDomainModLayer(nn.Module):
         N, C, H, W = x.shape
         device = x.device
 
+        # Device check: warn if running on CPU (performance disaster)
+        if not x.is_cuda and self.training:
+            import warnings
+            warnings.warn(
+                f"⚠️  FDM forward on CPU! Shape: [{N},{C},{H},{W}], "
+                f"bands: {self.num_bands}. This will be VERY slow. "
+                f"Ensure model and data are on CUDA.",
+                RuntimeWarning,
+                stacklevel=2
+            )
+
         # 2D FFT (shift to center DC component)
         X = torch.fft.fft2(x, dim=(-2, -1))
         X = torch.fft.fftshift(X, dim=(-2, -1))
