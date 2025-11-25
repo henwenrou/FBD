@@ -102,8 +102,11 @@ class FreqDomainModLayer(nn.Module):
 
         band_masks = torch.cat(band_masks, dim=0)  # [B, H, W]
 
-        # Update cache
-        self.band_mask_cache = band_masks
+        # Update cache - re-register buffer to support dynamic shapes and proper checkpoint loading
+        if hasattr(self, 'band_mask_cache'):
+            # Remove old buffer before re-registering
+            delattr(self, 'band_mask_cache')
+        self.register_buffer("band_mask_cache", band_masks, persistent=True)
         self.cached_H.fill_(H)
         self.cached_W.fill_(W)
 
