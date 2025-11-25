@@ -88,7 +88,12 @@ if __name__ == "__main__":
     show_config = False
     model = instantiate_from_config(model_config)
     pl_sd=torch.load(ckpt, map_location="cpu")
-    model.load_state_dict(pl_sd['model'], strict=False)
+
+    # Filter out band_mask_cache from checkpoint (can be recomputed on first forward)
+    state_dict = pl_sd['model']
+    state_dict = {k: v for k, v in state_dict.items() if 'band_mask_cache' not in k}
+
+    model.load_state_dict(state_dict, strict=False)
     model.cuda().eval()
 
     data = instantiate_from_config(config.data)
