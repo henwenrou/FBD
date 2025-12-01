@@ -17,7 +17,7 @@ optimizer:
   lr_scheduler: lambda
 
 saliency_balancing_fusion:
-  usage: true
+  usage: false
   grid_size: 18
 
 data:
@@ -28,7 +28,15 @@ data:
     train:
       target: dataloaders.CardiacDataset.get_training
       params:
-        location_scale: true
+        location_scale: false
+        fourier_aug:
+          mode: baseline  # baseline | naive | fbd
+          p_fourier: 0.5
+          sigma: 0.08
+          alpha_range: [0.7, 1.0]
+          eps_max: 0.3
+          num_bands: 4
+          band_weights: [2.0, 1.5, 1.0, 0.5]
         modality:
           - bSSFP
         tile_z_dim: 1

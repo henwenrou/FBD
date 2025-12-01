@@ -4,6 +4,7 @@ import numpy as np
 import dataloaders.niftiio as nio
 import dataloaders.transform_utils as trans
 import torch
+from dataloaders.fourier_augment import fourier_augment, build_radial_band_masks
 import os
 import platform
 import torch.utils.data as torch_data
@@ -57,7 +58,7 @@ def get_normalize_op(fids, domain=False):
         return mean_std_norm(_mean, _std)
 
 class AbdominalDataset(torch_data.Dataset):
-    def __init__(self,  mode, transforms, base_dir, domains: list,  idx_pct = [0.7, 0.1, 0.2], tile_z_dim = 3, extern_norm_fn = None, location_scale=False):
+    def __init__(self,  mode, transforms, base_dir, domains: list,  idx_pct = [0.7, 0.1, 0.2], tile_z_dim = 3, extern_norm_fn = None, location_scale=False, fourier_aug=None):
         """
         Args:
             mode:               'train', 'val', 'test', 'test_all'
@@ -75,6 +76,16 @@ class AbdominalDataset(torch_data.Dataset):
         self.tile_z_dim = tile_z_dim
         self._base_dir = base_dir
         self.idx_pct = idx_pct
+
+        # Fourier augmentation config
+        self.fourier_cfg = fourier_aug or {}
+        self.fourier_mode = str(self.fourier_cfg.get("mode", "baseline")).lower()
+        self.p_fourier = self.fourier_cfg.get("p_fourier", self.fourier_cfg.get("p", 0.5))
+        self.fourier_sigma = self.fourier_cfg.get("sigma", 0.08)
+        self.fourier_alpha_range = tuple(self.fourier_cfg.get("alpha_range", (0.7, 1.0)))
+        self.fourier_eps_max = self.fourier_cfg.get("eps_max", 0.3)
+        self.band_masks = None
+        self.band_weights = None
 
         self.img_pids = {}
         for _domain in self.domains: # load file names
@@ -100,6 +111,7 @@ class AbdominalDataset(torch_data.Dataset):
         # load to memory
         self.actual_dataset = self.__read_dataset()
         self.size = len(self.actual_dataset) # 2D
+        self._prepare_fourier_resources()
         if location_scale:
             print(f'Applying Location Scale Augmentation on {mode} split')
             self.location_scale = LocationScaleAugmentation(vrange=(0.,1.), background_threshold=0.01)
@@ -227,6 +239,48 @@ class AbdominalDataset(torch_data.Dataset):
         return out_list
 
 
+    def _prepare_fourier_resources(self):
+        """Pre-compute band masks/weights for FBD mode."""
+        if not self.is_train:
+            return
+        if self.fourier_mode != "fbd":
+            return
+        if len(self.actual_dataset) == 0:
+            return
+
+        h, w = self.actual_dataset[0]["img"].shape[:2]
+        if self.fourier_cfg.get("band_masks") is not None:
+            masks = []
+            for m in self.fourier_cfg["band_masks"]:
+                mask_t = m if isinstance(m, torch.Tensor) else torch.tensor(m)
+                masks.append(mask_t.to(torch.bool))
+            self.band_masks = masks
+        else:
+            num_bands = int(self.fourier_cfg.get("num_bands", 4))
+            self.band_masks = build_radial_band_masks(h, w, num_bands)
+
+        self.band_weights = self.fourier_cfg.get("band_weights")
+        if self.band_weights is None:
+            self.band_weights = [1.0 for _ in range(len(self.band_masks))]
+
+        if len(self.band_masks) != len(self.band_weights):
+            raise ValueError("band_masks and band_weights must have the same length.")
+
+    def _apply_fourier(self, img: torch.Tensor) -> torch.Tensor:
+        """Apply configured Fourier augmentation if enabled."""
+        if not self.is_train:
+            return img
+        return fourier_augment(
+            img,
+            mode=self.fourier_mode,
+            p_fourier=self.p_fourier,
+            sigma=self.fourier_sigma,
+            alpha_range=self.fourier_alpha_range,
+            band_masks=self.band_masks,
+            band_weights=self.band_weights,
+            eps_max=self.fourier_eps_max,
+        )
+
     def __getitem__(self, index):
         index = index % len(self.actual_dataset)
         curr_dict = self.actual_dataset[index]
@@ -276,6 +330,11 @@ class AbdominalDataset(torch_data.Dataset):
             img = img.repeat( [ self.tile_z_dim, 1, 1] )
             assert img.ndimension() == 3
 
+        if self.fourier_mode != "baseline":
+            img = self._apply_fourier(img)
+            if torch.is_tensor(aug_img) and aug_img.ndimension() == 3:
+                aug_img = self._apply_fourier(aug_img)
+
         is_start    = curr_dict["is_start"]
         is_end      = curr_dict["is_end"]
         nframe      = np.int32(curr_dict["nframe"])
@@ -310,7 +369,7 @@ class AbdominalDataset(torch_data.Dataset):
 
 tr_func  = trans.transform_with_label(trans.tr_aug)
 from functools import partial
-def get_training(modality,location_scale, idx_pct = [0.7, 0.1, 0.2], tile_z_dim = 3):
+def get_training(modality,location_scale, idx_pct = [0.7, 0.1, 0.2], tile_z_dim = 3, fourier_aug=None):
     return AbdominalDataset(idx_pct = idx_pct,\
         mode = 'train',\
         domains = modality,\
@@ -318,7 +377,8 @@ def get_training(modality,location_scale, idx_pct = [0.7, 0.1, 0.2], tile_z_dim 
         base_dir = BASEDIR,\
         extern_norm_fn = partial(get_normalize_op,domain=True), # normalization function is decided by domain
         tile_z_dim = tile_z_dim,
-        location_scale=location_scale)
+        location_scale=location_scale,
+        fourier_aug=fourier_aug)
 
 def get_validation(modality, idx_pct = [0.7, 0.1, 0.2], tile_z_dim = 3):
      return AbdominalDataset(idx_pct = idx_pct,\
@@ -346,4 +406,3 @@ def get_test_all(modality, tile_z_dim = 3, idx_pct = [0.7, 0.1, 0.2]):
         extern_norm_fn = partial(get_normalize_op,domain=False),
         base_dir = BASEDIR,\
         tile_z_dim = tile_z_dim)
-
