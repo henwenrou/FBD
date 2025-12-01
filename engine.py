@@ -216,7 +216,7 @@ def evaluate(model: torch.nn.Module, data_loader: Iterable, device: torch.device
     dices=np.nanmean(dices,0)
     return dices
 
-def prediction_wrapper(model, test_loader, epoch, label_name, mode = 'base', save_prediction = False):
+def prediction_wrapper(model, test_loader, epoch, label_name, mode='base', save_prediction=False, device=None):
     """
     A wrapper for the ease of evaluation
     Args:
@@ -224,6 +224,8 @@ def prediction_wrapper(model, test_loader, epoch, label_name, mode = 'base', sav
         test_loader:    DataLoader Dataloader for the dataset to test
         mode:           str Adding a note for the saved testing results
     """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.eval()
     with torch.no_grad():
         out_prediction_list = {} # a buffer for saving results
@@ -237,14 +239,14 @@ def prediction_wrapper(model, test_loader, epoch, label_name, mode = 'base', sav
 
                 nframe = batch['nframe']
                 nb, nc, nx, ny = batch['images'].shape
-                curr_pred = torch.Tensor(np.zeros( [ nframe,  nx, ny]  )).cuda() # nb/nz, nc, nx, ny
-                curr_gth = torch.Tensor(np.zeros( [nframe,  nx, ny]  )).cuda()
+                curr_pred = torch.tensor(np.zeros([nframe, nx, ny]), device=device) # nb/nz, nc, nx, ny
+                curr_gth = torch.tensor(np.zeros([nframe, nx, ny]), device=device)
                 curr_img = np.zeros( [nx, ny, nframe]  )
 
             assert batch['labels'].shape[0] == 1 # enforce a batchsize of 1
 
-            img = batch['images'].cuda()
-            gth = batch['labels'].cuda()
+            img = batch['images'].to(device)
+            gth = batch['labels'].to(device)
 
             pred = model(img)
             pred=torch.argmax(pred,1)

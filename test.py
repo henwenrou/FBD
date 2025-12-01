@@ -64,9 +64,15 @@ if __name__ == "__main__":
         else:
             assert os.path.isdir(opt.resume), opt.resume
             logdir = opt.resume.rstrip("/")
-            for f in os.listdir(os.path.join(logdir,"checkpoints")):
+            ckpt_dir = os.path.join(logdir, "checkpoints")
+            for f in os.listdir(ckpt_dir):
                 if 'latest' in f:
-                    ckpt = os.path.join(logdir, "checkpoints", f)
+                    ckpt = os.path.join(ckpt_dir, f)
+            if ckpt is None:
+                # fallback: pick any checkpoint (sorted) if latest not present
+                ckpts = sorted(glob.glob(os.path.join(ckpt_dir, "*.pth")))
+                if len(ckpts) > 0:
+                    ckpt = ckpts[-1]
         print(f"logdir:{logdir}")
         base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*-project.yaml")))
         opt.base = base_configs+opt.base
@@ -87,6 +93,10 @@ if __name__ == "__main__":
     eval_mode = True
     show_config = False
     model = instantiate_from_config(model_config)
+
+    if ckpt is None:
+        raise ValueError("No checkpoint found. Please provide a checkpoint file or a logdir with checkpoints.")
+
     pl_sd=torch.load(ckpt, map_location="cpu")
 
     # Filter out band_mask_cache from checkpoint (can be recomputed on first forward)
@@ -94,7 +104,9 @@ if __name__ == "__main__":
     state_dict = {k: v for k, v in state_dict.items() if 'band_mask_cache' not in k}
 
     model.load_state_dict(state_dict, strict=False)
-    model.cuda().eval()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device).eval()
 
     data = instantiate_from_config(config.data)
     data.prepare_data()
@@ -103,5 +115,5 @@ if __name__ == "__main__":
     test_loader = DataLoader(data.datasets["test"], batch_size=1, num_workers=1)
     from engine import prediction_wrapper
     label_name=data.datasets["train"].all_label_names
-    out_prediction_list, dsc_table, error_dict, domain_names = prediction_wrapper(model, test_loader, 0, label_name, save_prediction=True)
+    out_prediction_list, dsc_table, error_dict, domain_names = prediction_wrapper(model, test_loader, 0, label_name, save_prediction=True, device=device)
 

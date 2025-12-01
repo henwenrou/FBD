@@ -174,8 +174,9 @@ if __name__ == "__main__":
     SBF_config = config.pop('saliency_balancing_fusion',OmegaConf.create())
 
     model = instantiate_from_config(model_config)
-    if torch.cuda.is_available():
-        model=model.cuda()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda':
+        model = model.cuda()
 
     if getattr(model_config.params, 'base_learning_rate') :
         bs, base_lr = config.data.params.batch_size, optimizer_config.base_learning_rate
@@ -236,21 +237,21 @@ if __name__ == "__main__":
 
     if getattr(optimizer_config, 'warmup_iter'):
         if optimizer_config.warmup_iter>0:
-            train_warm_up(model, criterion, train_loader, opt, torch.device('cuda'), lr, optimizer_config.warmup_iter)
+            train_warm_up(model, criterion, train_loader, opt, device, lr, optimizer_config.warmup_iter)
     cur_iter=0
     best_dice=0
     label_name=data.datasets["train"].all_label_names
     for cur_epoch in range(max_epoch):
         if SBF_config.usage:
-            cur_iter = train_one_epoch_SBF(model, criterion,train_loader,opt,torch.device('cuda'),cur_epoch,cur_iter, optimizer_config.max_iter, SBF_config, visdir)
+            cur_iter = train_one_epoch_SBF(model, criterion, train_loader, opt, device, cur_epoch, cur_iter, optimizer_config.max_iter, SBF_config, visdir)
         else:
-            cur_iter = train_one_epoch(model, criterion, train_loader, opt, torch.device('cuda'), cur_epoch, cur_iter, optimizer_config.max_iter)
+            cur_iter = train_one_epoch(model, criterion, train_loader, opt, device, cur_epoch, cur_iter, optimizer_config.max_iter)
         if scheduler is not None:
             scheduler.step()
 
         # Save Bset model on val
         if (cur_epoch+1)%100==0:
-            cur_dice = evaluate(model, val_loader, torch.device('cuda'))
+            cur_dice = evaluate(model, val_loader, device)
             if np.mean(cur_dice)>best_dice:
                 best_dice=np.mean(cur_dice)
                 for f in os.listdir(ckptdir):
