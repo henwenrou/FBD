@@ -1,6 +1,11 @@
 import torch
 from typing import List, Sequence, Tuple, Optional, Union
 
+try:
+    from omegaconf import ListConfig
+except Exception:  # pragma: no cover - optional dependency
+    ListConfig = ()  # type: ignore
+
 
 def build_radial_band_masks(height: int, width: int, num_bands: int) -> List[torch.Tensor]:
     """
@@ -120,12 +125,14 @@ def fourier_augment(
 
 def _expand_to_band_params(value: Union[float, Sequence[float]], num_bands: int) -> List[float]:
     """Expand scalar or single-entry list to per-band list."""
-    if isinstance(value, (list, tuple)):
-        if len(value) == 1:
-            return [float(value[0]) for _ in range(num_bands)]
-        if len(value) != num_bands:
-            raise ValueError(f"Expected {num_bands} values, got {len(value)}.")
-        return [float(v) for v in value]
+    # Accept Python list/tuple, OmegaConf ListConfig, or scalar
+    if isinstance(value, (list, tuple, ListConfig)):
+        value_list = list(value)
+        if len(value_list) == 1:
+            return [float(value_list[0]) for _ in range(num_bands)]
+        if len(value_list) != num_bands:
+            raise ValueError(f"Expected {num_bands} values, got {len(value_list)}.")
+        return [float(v) for v in value_list]
     return [float(value) for _ in range(num_bands)]
 
 
