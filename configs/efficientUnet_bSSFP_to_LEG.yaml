@@ -20,6 +20,35 @@ saliency_balancing_fusion:
   usage: false
   grid_size: 18
 
+core_fbd:
+  usage: true
+  num_views: 3
+  saliency_threshold: 0.65
+  pred_var_threshold: 0.02
+  saliency_grid: 16
+  use_pred_consistency: true
+  slaug:
+    brightness: 0.08
+    contrast: 0.08
+    noise_std: 0.01
+    max_rotate: 5
+    max_translate: 0.02
+    max_scale: 0.05
+    flip: true
+  frequency:
+    p_fourier: 0.7
+    sigma: 0.08
+    alpha_range: [0.7, 1.0]
+    eps_max: 0.3
+    num_bands: 4
+    band_weights: [2.0, 1.5, 1.0, 0.5]
+    lambda_core: [0.05, 0.05, 0.05, 0.05]
+    lambda_noncore: [1.5, 1.2, 1.0, 0.8]
+  loss:
+    lambda_core_inv: 1.0
+    lambda_noncore_reg: 0.3
+    noncore_margin: 0.7
+
 data:
   target: main.DataModuleFromConfig
   params:

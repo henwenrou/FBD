@@ -1,5 +1,5 @@
 import torch
-from typing import List, Sequence, Tuple, Optional
+from typing import List, Sequence, Tuple, Optional, Union
 
 
 def build_radial_band_masks(height: int, width: int, num_bands: int) -> List[torch.Tensor]:
@@ -116,3 +116,112 @@ def fourier_augment(
         x_aug[c] = (1 - alpha) * xc + alpha * x_fourier
 
     return x_aug
+
+
+def _expand_to_band_params(value: Union[float, Sequence[float]], num_bands: int) -> List[float]:
+    """Expand scalar or single-entry list to per-band list."""
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            return [float(value[0]) for _ in range(num_bands)]
+        if len(value) != num_bands:
+            raise ValueError(f"Expected {num_bands} values, got {len(value)}.")
+        return [float(v) for v in value]
+    return [float(value) for _ in range(num_bands)]
+
+
+def core_guided_fourier_augment(
+    x: torch.Tensor,
+    core_mask: torch.Tensor,
+    p_fourier: float = 0.5,
+    sigma: float = 0.08,
+    alpha_range: Tuple[float, float] = (0.7, 1.0),
+    band_masks: Optional[Sequence[torch.Tensor]] = None,
+    band_weights: Optional[Sequence[float]] = None,
+    eps_max: float = 0.3,
+    lambda_core: Union[float, Sequence[float]] = 0.05,
+    lambda_noncore: Union[float, Sequence[float]] = 1.0,
+) -> torch.Tensor:
+    """
+    Core-guided Fourier augmentation that preserves core structure while perturbing non-core regions.
+
+    Args:
+        x: Input tensor [B, C, H, W] (float32).
+        core_mask: Core mask [B, 1, H, W] or [B, H, W] with values in [0, 1].
+        p_fourier: Probability to apply Fourier perturbation per sample.
+        sigma: Base noise std for amplitude perturbation.
+        alpha_range: Range for linear mixing coefficient with the perturbed view.
+        band_masks: Optional list of [H, W] masks for frequency bands.
+        band_weights: Optional importance weights per band.
+        eps_max: Clamp range for multiplicative amplitude factor.
+        lambda_core: Multiplicative factor inside core (can be scalar or list per band).
+        lambda_noncore: Multiplicative factor outside core (scalar or list per band).
+
+    Returns:
+        Augmented tensor with the same shape as x.
+    """
+    if x.ndimension() != 4:
+        raise ValueError(f"core_guided_fourier_augment expects [B, C, H, W], got {x.shape}")
+
+    device = x.device
+    B, C, H, W = x.shape
+
+    # Build frequency band resources
+    if band_masks is None:
+        nb = len(band_weights) if band_weights is not None else 4
+        band_masks = build_radial_band_masks(H, W, nb)
+    num_bands = len(band_masks)
+    if band_weights is None:
+        band_weights = [1.0 for _ in range(num_bands)]
+    if len(band_weights) != num_bands:
+        raise ValueError("band_masks and band_weights must have the same length.")
+
+    lambda_core_list = _expand_to_band_params(lambda_core, num_bands)
+    lambda_non_list = _expand_to_band_params(lambda_noncore, num_bands)
+
+    masks = torch.stack([bm.to(device).to(torch.bool) for bm in band_masks], dim=0)  # [num_bands, H, W]
+    w = torch.tensor(band_weights, dtype=torch.float32, device=device)
+    w = w / (w.mean() + 1e-6)
+    sigma_b = sigma * w
+
+    core_mask = core_mask.to(device)
+    if core_mask.ndimension() == 3:
+        core_mask = core_mask.unsqueeze(1)
+    if core_mask.shape[1] != 1:
+        core_mask = core_mask[:, :1]
+    core_mask = core_mask.clamp(0.0, 1.0)
+
+    outputs: List[torch.Tensor] = []
+    for b_idx in range(B):
+        if torch.rand(1, device=device) > p_fourier:
+            outputs.append(x[b_idx])
+            continue
+
+        cm = core_mask[b_idx, 0]  # [H, W]
+        sample = x[b_idx]
+        aug_channels = []
+
+        for c_idx in range(C):
+            xc = sample[c_idx]
+            F = torch.fft.fft2(xc)
+            A = torch.abs(F)
+            phase = torch.angle(F)
+
+            eps = torch.zeros_like(A)
+            for band in range(num_bands):
+                spatial_weight = lambda_core_list[band] * cm + lambda_non_list[band] * (1 - cm)
+                noise_b = torch.randn_like(A) * sigma_b[band] * spatial_weight
+                eps = torch.where(masks[band], noise_b, eps)
+
+            factor = torch.clamp(1.0 + eps, 1.0 - eps_max, 1.0 + eps_max)
+            A_perturbed = torch.clamp(A * factor, min=0.0)
+
+            F_perturbed = A_perturbed * torch.exp(1j * phase)
+            x_fourier = torch.fft.ifft2(F_perturbed).real
+            x_fourier = _match_stats(x_fourier, xc)
+
+            alpha = torch.empty(1, device=device).uniform_(*alpha_range).item()
+            aug_channels.append((1 - alpha) * xc + alpha * x_fourier)
+
+        outputs.append(torch.stack(aug_channels, dim=0))
+
+    return torch.stack(outputs, dim=0)
