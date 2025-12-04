@@ -1,5 +1,5 @@
 import torch
-from typing import List, Sequence, Tuple, Optional, Union
+from typing import Iterable, List, Sequence, Tuple, Optional, Union
 
 try:
     from omegaconf import ListConfig
@@ -136,6 +136,23 @@ def _expand_to_band_params(value: Union[float, Sequence[float]], num_bands: int)
     return [float(value) for _ in range(num_bands)]
 
 
+def _normalize_active_bands(active_bands: Optional[Iterable[int]], num_bands: int) -> Optional[List[int]]:
+    """Keep only valid band indices, return sorted unique list."""
+    if active_bands is None:
+        return None
+    bands: List[int] = []
+    for b in active_bands:
+        try:
+            idx = int(b)
+        except Exception:
+            continue
+        if 0 <= idx < num_bands:
+            bands.append(idx)
+    if not bands:
+        return []
+    return sorted(list(set(bands)))
+
+
 def core_guided_fourier_augment(
     x: torch.Tensor,
     core_mask: torch.Tensor,
@@ -147,6 +164,10 @@ def core_guided_fourier_augment(
     eps_max: float = 0.3,
     lambda_core: Union[float, Sequence[float]] = 0.05,
     lambda_noncore: Union[float, Sequence[float]] = 1.0,
+    active_bands: Optional[Sequence[int]] = None,
+    global_lambda: float = 1.0,
+    background_only: bool = False,
+    saliency_exponent: float = 1.0,
 ) -> torch.Tensor:
     """
     Core-guided Fourier augmentation that preserves core structure while perturbing non-core regions.
@@ -162,12 +183,19 @@ def core_guided_fourier_augment(
         eps_max: Clamp range for multiplicative amplitude factor.
         lambda_core: Multiplicative factor inside core (can be scalar or list per band).
         lambda_noncore: Multiplicative factor outside core (scalar or list per band).
+        active_bands: Optional list of band indices to perturb (e.g., [0, num_bands-1] for low/high only).
+        global_lambda: Global strength multiplier (used for curriculum scheduling).
+        background_only: If true, suppress perturbation on salient/core pixels entirely.
+        saliency_exponent: Exponent applied to the saliency mask to sharpen/soften the core vs. non-core separation.
 
     Returns:
         Augmented tensor with the same shape as x.
     """
     if x.ndimension() != 4:
         raise ValueError(f"core_guided_fourier_augment expects [B, C, H, W], got {x.shape}")
+
+    if global_lambda <= 0:
+        return x.clone()
 
     device = x.device
     B, C, H, W = x.shape
@@ -182,13 +210,14 @@ def core_guided_fourier_augment(
     if len(band_weights) != num_bands:
         raise ValueError("band_masks and band_weights must have the same length.")
 
+    active_bands_list = _normalize_active_bands(active_bands, num_bands)
     lambda_core_list = _expand_to_band_params(lambda_core, num_bands)
     lambda_non_list = _expand_to_band_params(lambda_noncore, num_bands)
 
     masks = torch.stack([bm.to(device).to(torch.bool) for bm in band_masks], dim=0)  # [num_bands, H, W]
     w = torch.tensor(band_weights, dtype=torch.float32, device=device)
     w = w / (w.mean() + 1e-6)
-    sigma_b = sigma * w
+    sigma_b = sigma * w * global_lambda
 
     core_mask = core_mask.to(device)
     if core_mask.ndimension() == 3:
@@ -196,6 +225,7 @@ def core_guided_fourier_augment(
     if core_mask.shape[1] != 1:
         core_mask = core_mask[:, :1]
     core_mask = core_mask.clamp(0.0, 1.0)
+    saliency_exponent = float(max(saliency_exponent, 1e-6))
 
     outputs: List[torch.Tensor] = []
     for b_idx in range(B):
@@ -204,6 +234,13 @@ def core_guided_fourier_augment(
             continue
 
         cm = core_mask[b_idx, 0]  # [H, W]
+        if saliency_exponent != 1.0:
+            cm = cm.pow(saliency_exponent)
+        noncore_mask = (1 - cm).clamp(0.0, 1.0)
+        if saliency_exponent != 1.0:
+            noncore_mask = noncore_mask.pow(saliency_exponent)
+        core_component = torch.zeros_like(cm) if background_only else cm
+
         sample = x[b_idx]
         aug_channels = []
 
@@ -215,7 +252,9 @@ def core_guided_fourier_augment(
 
             eps = torch.zeros_like(A)
             for band in range(num_bands):
-                spatial_weight = lambda_core_list[band] * cm + lambda_non_list[band] * (1 - cm)
+                if active_bands_list is not None and band not in active_bands_list:
+                    continue
+                spatial_weight = lambda_core_list[band] * core_component + lambda_non_list[band] * noncore_mask
                 noise_b = torch.randn_like(A) * sigma_b[band] * spatial_weight
                 eps = torch.where(masks[band], noise_b, eps)
 

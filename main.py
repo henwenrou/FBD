@@ -244,7 +244,7 @@ if __name__ == "__main__":
     label_name=data.datasets["train"].all_label_names
     for cur_epoch in range(max_epoch):
         if getattr(core_fbd_config, "usage", False):
-            cur_iter = train_one_epoch_core_fbd(model, criterion, train_loader, opt, device, cur_epoch, cur_iter, optimizer_config.max_iter, core_fbd_config)
+            cur_iter = train_one_epoch_core_fbd(model, criterion, train_loader, opt, device, cur_epoch, cur_iter, optimizer_config.max_iter, core_fbd_config, total_epochs=max_epoch)
         elif getattr(SBF_config, "usage", False):
             cur_iter = train_one_epoch_SBF(model, criterion, train_loader, opt, device, cur_epoch, cur_iter, optimizer_config.max_iter, SBF_config, visdir)
         else:

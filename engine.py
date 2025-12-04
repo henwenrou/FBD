@@ -203,6 +203,39 @@ def _cfg_get(cfg, key, default=None):
     return getattr(cfg, key, default)
 
 
+def _compute_curriculum_lambda(epoch: int, total_epochs: int, curriculum_cfg) -> float:
+    """Piecewise schedule for perturbation strength λ(e)."""
+    if curriculum_cfg is None or not _cfg_get(curriculum_cfg, "enabled", False):
+        return 1.0
+    if total_epochs is None or total_epochs <= 0:
+        return 1.0
+
+    warmup_ratio = float(_cfg_get(curriculum_cfg, "warmup_ratio", 0.2))
+    ramp_ratio = float(_cfg_get(curriculum_cfg, "ramp_ratio", 0.4))
+    start_lambda = float(_cfg_get(curriculum_cfg, "start_lambda", 0.0))
+    max_lambda = float(_cfg_get(curriculum_cfg, "max_lambda", 1.0))
+    final_lambda = float(_cfg_get(curriculum_cfg, "final_lambda", max_lambda))
+    schedule = str(_cfg_get(curriculum_cfg, "schedule", "linear")).lower()
+
+    progress = max(0.0, min(1.0, float(epoch) / max(total_epochs - 1, 1)))
+    warmup_end = warmup_ratio
+    ramp_end = warmup_ratio + ramp_ratio
+
+    if progress < warmup_end:
+        lam = start_lambda
+    elif progress < ramp_end:
+        t = (progress - warmup_end) / max(ramp_ratio, 1e-6)
+        if schedule == "cosine":
+            lam = start_lambda + (max_lambda - start_lambda) * 0.5 * (1 - math.cos(math.pi * t))
+        else:
+            lam = start_lambda + (max_lambda - start_lambda) * t
+    else:
+        tail = (progress - ramp_end) / max(1 - ramp_end, 1e-6)
+        lam = max_lambda + (final_lambda - max_lambda) * max(0.0, min(1.0, tail))
+
+    return max(0.0, lam)
+
+
 def _random_affine_2d(images, max_rotate, max_translate, max_scale):
     if max_rotate <= 0 and max_translate <= 0 and max_scale <= 0:
         return images
@@ -301,7 +334,7 @@ def _compute_core_mask(model, criterion, images, labels, core_cfg):
 def train_one_epoch_core_fbd(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, cur_iteration:int, max_iteration: int = -1,
-                    core_cfg=None, grad_scaler=None):
+                    core_cfg=None, grad_scaler=None, total_epochs=None):
     """
     Core-guided FBD training with SLAug views, core invariance, and non-core regularization.
     """
@@ -310,12 +343,14 @@ def train_one_epoch_core_fbd(model: torch.nn.Module, criterion: torch.nn.Module,
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('fbd_lambda', utils.SmoothedValue(window_size=1, fmt='{value:.3f}'))
 
     header = 'Epoch: [{}][CoreFBD]'.format(epoch)
     print_freq = 10
 
     freq_cfg = _cfg_get(core_cfg, "frequency", core_cfg)
     loss_cfg = _cfg_get(core_cfg, "loss", core_cfg)
+    curriculum_cfg = _cfg_get(core_cfg, "curriculum", None)
 
     lambda_core_inv = _cfg_get(loss_cfg, "lambda_core_inv", 1.0)
     lambda_noncore_reg = _cfg_get(loss_cfg, "lambda_noncore_reg", 0.0)
@@ -329,6 +364,17 @@ def train_one_epoch_core_fbd(model: torch.nn.Module, criterion: torch.nn.Module,
     band_weights = _cfg_get(freq_cfg, "band_weights", [1.0 for _ in range(num_bands)])
     lambda_core = _cfg_get(freq_cfg, "lambda_core", 0.05)
     lambda_noncore = _cfg_get(freq_cfg, "lambda_noncore", 1.0)
+    active_bands = _cfg_get(freq_cfg, "active_bands", None)
+    background_only = _cfg_get(freq_cfg, "background_only", False)
+    saliency_exponent = _cfg_get(freq_cfg, "saliency_exponent", 1.0)
+
+    schedule_epochs = total_epochs if total_epochs is not None else _cfg_get(curriculum_cfg, "total_epochs", None)
+    current_lambda = _compute_curriculum_lambda(epoch, schedule_epochs, curriculum_cfg)
+    effective_p_fourier = min(1.0, p_fourier * current_lambda)
+    effective_sigma = fourier_sigma * current_lambda
+    lambda_core_inv_epoch = lambda_core_inv * current_lambda
+    lambda_noncore_reg_epoch = lambda_noncore_reg * current_lambda
+    apply_fbd = current_lambda > 0 and effective_p_fourier > 0
 
     band_masks_cache = None
 
@@ -340,57 +386,56 @@ def train_one_epoch_core_fbd(model: torch.nn.Module, criterion: torch.nn.Module,
         images = samples['images']
         labels = samples['labels']
 
-        if band_masks_cache is None:
+        if apply_fbd and band_masks_cache is None:
             _, _, H, W = images.shape
             band_masks_cache = build_radial_band_masks(H, W, num_bands)
 
-        core_mask, _, _ = _compute_core_mask(model, criterion, images, labels, core_cfg)
-        images_fbd = core_guided_fourier_augment(
-            images,
-            core_mask,
-            p_fourier=p_fourier,
-            sigma=fourier_sigma,
-            alpha_range=alpha_range,
-            band_masks=band_masks_cache,
-            band_weights=band_weights,
-            eps_max=eps_max,
-            lambda_core=lambda_core,
-            lambda_noncore=lambda_noncore,
-        )
+        if not apply_fbd:
+            if grad_scaler is None:
+                logits = model(images)
+                loss_dict = criterion.get_loss(logits, labels)
+                seg_loss = sum(loss_dict[k] * criterion.weight_dict[k] for k in loss_dict.keys() if k in criterion.weight_dict)
+                optimizer.zero_grad()
+                seg_loss.backward()
+                optimizer.step()
+            else:
+                with torch.cuda.amp.autocast():
+                    logits = model(images)
+                    loss_dict = criterion.get_loss(logits, labels)
+                    seg_loss = sum(loss_dict[k] * criterion.weight_dict[k] for k in loss_dict.keys() if k in criterion.weight_dict)
+                optimizer.zero_grad()
+                grad_scaler.scale(seg_loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
 
-        if grad_scaler is None:
-            logits = model(images)
-            logits_fbd = model(images_fbd)
-            loss_dict = criterion.get_loss(logits, labels)
-            loss_dict_fbd = criterion.get_loss(logits_fbd, labels)
-
-            seg_loss = sum(loss_dict[k] * criterion.weight_dict[k] for k in loss_dict.keys() if k in criterion.weight_dict)
-            seg_loss_fbd = sum(loss_dict_fbd[k] * criterion.weight_dict[k] for k in loss_dict_fbd.keys() if k in criterion.weight_dict)
-            prob = torch.softmax(logits, dim=1)
-            prob_fbd = torch.softmax(logits_fbd, dim=1)
-            core_mask_exp = core_mask if core_mask.ndimension() == 4 else core_mask.unsqueeze(1)
-            core_pixels = core_mask_exp.sum() + 1e-6
-            core_inv = ((prob - prob_fbd) ** 2 * core_mask_exp).sum() / core_pixels
-
+            loss_dict_fbd = loss_dict
+            core_inv = torch.tensor(0.0, device=device)
             noncore_loss = torch.tensor(0.0, device=device)
-            if lambda_noncore_reg > 0:
-                non_mask = (1 - core_mask_exp).clamp(0.0, 1.0)
-                non_pixels = non_mask.sum()
-                fg_prob = prob_fbd[:, 1:, ...]
-                max_fg, _ = torch.max(fg_prob, dim=1, keepdim=True)
-                reg = torch.clamp(max_fg - noncore_margin, min=0.0)
-                noncore_loss = (reg * non_mask).sum() / (non_pixels + 1e-6)
-
-            total_loss = seg_loss + seg_loss_fbd + lambda_core_inv * core_inv + lambda_noncore_reg * noncore_loss
-            optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
         else:
-            with torch.cuda.amp.autocast():
+            core_mask, _, _ = _compute_core_mask(model, criterion, images, labels, core_cfg)
+            images_fbd = core_guided_fourier_augment(
+                images,
+                core_mask,
+                p_fourier=effective_p_fourier,
+                sigma=effective_sigma,
+                alpha_range=alpha_range,
+                band_masks=band_masks_cache,
+                band_weights=band_weights,
+                eps_max=eps_max,
+                lambda_core=lambda_core,
+                lambda_noncore=lambda_noncore,
+                active_bands=active_bands,
+                global_lambda=current_lambda,
+                background_only=background_only,
+                saliency_exponent=saliency_exponent,
+            )
+
+            if grad_scaler is None:
                 logits = model(images)
                 logits_fbd = model(images_fbd)
                 loss_dict = criterion.get_loss(logits, labels)
                 loss_dict_fbd = criterion.get_loss(logits_fbd, labels)
+
                 seg_loss = sum(loss_dict[k] * criterion.weight_dict[k] for k in loss_dict.keys() if k in criterion.weight_dict)
                 seg_loss_fbd = sum(loss_dict_fbd[k] * criterion.weight_dict[k] for k in loss_dict_fbd.keys() if k in criterion.weight_dict)
                 prob = torch.softmax(logits, dim=1)
@@ -400,7 +445,7 @@ def train_one_epoch_core_fbd(model: torch.nn.Module, criterion: torch.nn.Module,
                 core_inv = ((prob - prob_fbd) ** 2 * core_mask_exp).sum() / core_pixels
 
                 noncore_loss = torch.tensor(0.0, device=device)
-                if lambda_noncore_reg > 0:
+                if lambda_noncore_reg_epoch > 0:
                     non_mask = (1 - core_mask_exp).clamp(0.0, 1.0)
                     non_pixels = non_mask.sum()
                     fg_prob = prob_fbd[:, 1:, ...]
@@ -408,12 +453,39 @@ def train_one_epoch_core_fbd(model: torch.nn.Module, criterion: torch.nn.Module,
                     reg = torch.clamp(max_fg - noncore_margin, min=0.0)
                     noncore_loss = (reg * non_mask).sum() / (non_pixels + 1e-6)
 
-                total_loss = seg_loss + seg_loss_fbd + lambda_core_inv * core_inv + lambda_noncore_reg * noncore_loss
+                total_loss = seg_loss + seg_loss_fbd + lambda_core_inv_epoch * core_inv + lambda_noncore_reg_epoch * noncore_loss
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+            else:
+                with torch.cuda.amp.autocast():
+                    logits = model(images)
+                    logits_fbd = model(images_fbd)
+                    loss_dict = criterion.get_loss(logits, labels)
+                    loss_dict_fbd = criterion.get_loss(logits_fbd, labels)
+                    seg_loss = sum(loss_dict[k] * criterion.weight_dict[k] for k in loss_dict.keys() if k in criterion.weight_dict)
+                    seg_loss_fbd = sum(loss_dict_fbd[k] * criterion.weight_dict[k] for k in loss_dict_fbd.keys() if k in criterion.weight_dict)
+                    prob = torch.softmax(logits, dim=1)
+                    prob_fbd = torch.softmax(logits_fbd, dim=1)
+                    core_mask_exp = core_mask if core_mask.ndimension() == 4 else core_mask.unsqueeze(1)
+                    core_pixels = core_mask_exp.sum() + 1e-6
+                    core_inv = ((prob - prob_fbd) ** 2 * core_mask_exp).sum() / core_pixels
 
-            optimizer.zero_grad()
-            grad_scaler.scale(total_loss).backward()
-            grad_scaler.step(optimizer)
-            grad_scaler.update()
+                    noncore_loss = torch.tensor(0.0, device=device)
+                    if lambda_noncore_reg_epoch > 0:
+                        non_mask = (1 - core_mask_exp).clamp(0.0, 1.0)
+                        non_pixels = non_mask.sum()
+                        fg_prob = prob_fbd[:, 1:, ...]
+                        max_fg, _ = torch.max(fg_prob, dim=1, keepdim=True)
+                        reg = torch.clamp(max_fg - noncore_margin, min=0.0)
+                        noncore_loss = (reg * non_mask).sum() / (non_pixels + 1e-6)
+
+                    total_loss = seg_loss + seg_loss_fbd + lambda_core_inv_epoch * core_inv + lambda_noncore_reg_epoch * noncore_loss
+
+                optimizer.zero_grad()
+                grad_scaler.scale(total_loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
 
         metric_logger.update(
             ce=loss_dict['ce_loss'],
@@ -423,7 +495,7 @@ def train_one_epoch_core_fbd(model: torch.nn.Module, criterion: torch.nn.Module,
             core_inv=core_inv,
             noncore=noncore_loss,
         )
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"], fbd_lambda=current_lambda)
         cur_iteration += 1
 
         if cur_iteration >= max_iteration and max_iteration > 0:

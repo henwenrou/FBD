@@ -11,7 +11,7 @@ optimizer:
   target: torch.optim.Adam
   learning_rate: 3e-4
   weight_decay: 3e-5
-  max_epoch: 50
+  max_epoch: 200
   max_iter: -1
   warmup_iter: -1
   lr_scheduler: lambda
@@ -35,15 +35,27 @@ core_fbd:
     max_translate: 0.02
     max_scale: 0.05
     flip: true
+  curriculum:
+    enabled: true
+    total_epochs: 200
+    warmup_ratio: 0.2
+    ramp_ratio: 0.4
+    start_lambda: 0.0
+    max_lambda: 1.0
+    final_lambda: 0.9
+    schedule: cosine
   frequency:
     p_fourier: 0.7
     sigma: 0.08
     alpha_range: [0.7, 1.0]
     eps_max: 0.3
     num_bands: 4
-    band_weights: [2.0, 1.5, 1.0, 0.5]
-    lambda_core: [0.05, 0.05, 0.05, 0.05]
-    lambda_noncore: [1.5, 1.2, 1.0, 0.8]
+    band_weights: [2.0, 1.0, 0.4, 1.6]
+    active_bands: [0, 3]
+    lambda_core: [0.0, 0.0, 0.0, 0.05]
+    lambda_noncore: [1.6, 1.2, 0.6, 1.6]
+    background_only: true
+    saliency_exponent: 1.5
   loss:
     lambda_core_inv: 1.0
     lambda_noncore_reg: 0
@@ -59,7 +71,7 @@ data:
       params:
         location_scale: false
         fourier_aug:
-          mode: baseline  # baseline | naive | fbd
+          mode: baseline
           p_fourier: 0.5
           sigma: 0.08
           alpha_range: [0.7, 1.0]
